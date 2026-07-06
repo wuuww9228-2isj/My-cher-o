@@ -1,0 +1,12 @@
+{
+  "name": "stremio-torrent-addon",
+  "version": "3.0.0",
+  "main": "index.js",
+  "dependencies": {
+    "stremio-addon-sdk": "^1.2.0",
+    "node-fetch": "^2.6.7"
+  },
+  "scripts": {
+    "start": "node index.js"
+  }
+}
