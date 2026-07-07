@@ -1,6 +1,6 @@
 {
-  "name": "rawstreamer-config",
-  "version": "8.0.0",
+  "name": "rawstreamer-final",
+  "version": "1.0.0",
   "scripts": {
     "start": "node index.js"
   },
