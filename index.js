@@ -1,6 +1,7 @@
 const express = require("express");
 const fetch = require("node-fetch");
 const pLimit = require("p-limit");
+const cloudscraper = require("cloudscraper");
 
 // ===================== CONFIG =====================
 const GENRES = [
@@ -8,15 +9,17 @@ const GENRES = [
   "Horror", "Sci-Fi", "Thriller", "Documentary", "Adult (XXX)"
 ];
 
-// Primary torrent source (DHT search, JSON API, no Cloudflare)
-const DHT_API = "https://dht.lc/search";
+// TPB mirrors – cloudscraper will bypass Cloudflare
+const TPB_MIRRORS = [
+  "https://apibay.org",
+  "https://tpb.party/apibay"
+];
 
-// Fallback: TorrentProject (alternative API)
-const TP_API = "https://torrentproject.cc/api/v1/torrents";
+const DHT_API = "https://dht.lc/search";
 
 const MANIFEST = {
   id: "community.rawstreamer.config",
-  version: "3.0.0",
+  version: "4.0.0",
   name: "Raw Torrent Streamer",
   description: "Unfiltered torrent catalog with Real-Debrid. Use the web config page to set your API key.",
   resources: ["catalog", "stream"],
@@ -66,7 +69,7 @@ app.use((req, res, next) => {
   next();
 });
 
-// ===================== CONFIGURATION PAGE (simplified) =====================
+// ===================== CONFIG PAGE – no button, auto‑generate link =====================
 app.get("/", (req, res) => {
   res.send(`
     <!DOCTYPE html>
@@ -77,42 +80,55 @@ app.get("/", (req, res) => {
       <style>
         body { font-family: Arial, sans-serif; background: #1e1e1e; color: #eee; padding: 2rem; text-align: center; }
         input { padding: 0.75rem; width: 300px; margin: 1rem 0; border: none; border-radius: 6px; }
-        button { padding: 0.75rem 2rem; background: #e50914; color: white; border: none; border-radius: 6px; cursor: pointer; }
-        .link { background: #333; padding: 1rem; border-radius: 8px; word-break: break-all; margin: 1rem auto; max-width: 600px; }
+        .link-box { background: #333; padding: 1rem; border-radius: 8px; word-break: break-all; margin: 1rem auto; max-width: 600px; }
         a { color: #e50914; }
       </style>
     </head>
     <body>
       <h2>⚙️ Configure Your Add-on</h2>
-      <p>Enter your Real-Debrid API token (<a href="https://real-debrid.com/apitoken" target="_blank">get it here</a>)</p>
-      <input type="text" id="apikey" placeholder="Paste your RD API key" />
-      <br/>
-      <button id="generateBtn">Generate Install Link</button>
-      <div id="result" style="margin-top:1.5rem;"></div>
+      <p>Paste your Real-Debrid API token below (<a href="https://real-debrid.com/apitoken" target="_blank">get it here</a>)</p>
+      <input type="text" id="apikey" placeholder="Paste your RD API key" oninput="updateLink()" />
+      <div id="result"></div>
       <script>
-        document.getElementById("generateBtn").addEventListener("click", function() {
+        function updateLink() {
           var key = document.getElementById("apikey").value.trim();
           if (!key) {
-            alert("Please enter your API key");
+            document.getElementById("result").innerHTML = "";
             return;
           }
           var installLink = window.location.origin + "/" + key + "/manifest.json";
           document.getElementById("result").innerHTML =
-            "<div class='link'>" +
+            "<div class='link-box'>" +
             "<strong>Your Stremio install link:</strong><br/>" +
             "<code>" + installLink + "</code><br/><br/>" +
             "<button onclick=\"navigator.clipboard.writeText('" + installLink + "')\">📋 Copy to Clipboard</button>" +
             "</div>";
-        });
+        }
       </script>
     </body>
     </html>
   `);
 });
 
-// ===================== TORRENT SEARCH FUNCTIONS =====================
+// ===================== TORRENT SEARCH (with cloudscraper) =====================
+async function searchTPB(query, category) {
+  for (const base of TPB_MIRRORS) {
+    try {
+      const url = `${base}/q.php?q=${encodeURIComponent(query)}&cat=${category || 0}`;
+      console.log(`Trying TPB (cloudscraper): ${url}`);
+      const body = await cloudscraper.get(url);
+      const data = JSON.parse(body);
+      if (Array.isArray(data) && data.length > 0 && data[0].id !== "0") {
+        console.log(`TPB success: ${data.length} torrents from ${base}`);
+        return data;
+      }
+    } catch (err) {
+      console.log(`TPB mirror ${base} failed: ${err.message}`);
+    }
+  }
+  return [];
+}
 
-// 1. DHT search (always returns JSON, no blocking)
 async function searchDHT(query) {
   try {
     const url = `${DHT_API}?q=${encodeURIComponent(query)}`;
@@ -135,29 +151,6 @@ async function searchDHT(query) {
   return [];
 }
 
-// 2. TorrentProject fallback (new API)
-async function searchTorrentProject(query) {
-  try {
-    const url = `${TP_API}?search=${encodeURIComponent(query)}&sort=seeders&limit=100`;
-    console.log(`Trying TorrentProject: ${url}`);
-    const resp = await fetch(url, { headers: { 'User-Agent': 'Mozilla/5.0' } });
-    const json = await resp.json();
-    if (json.torrents && json.torrents.length > 0) {
-      console.log(`TorrentProject returned ${json.torrents.length} results`);
-      return json.torrents.map(item => ({
-        info_hash: item.hash,
-        name: item.title,
-        size: item.size || 0,
-        seeders: item.seeders || 0,
-        added: item.uploaded || 0
-      }));
-    }
-  } catch (err) {
-    console.log(`TorrentProject failed: ${err.message}`);
-  }
-  return [];
-}
-
 // ===================== CATALOG HANDLER =====================
 async function handleCatalog(type, id, extra = {}) {
   let query = "";
@@ -170,17 +163,17 @@ async function handleCatalog(type, id, extra = {}) {
 
   if (!query) query = "1080p";   // default feed
 
-  // Try DHT first, then TorrentProject
-  let torrents = await searchDHT(query);
+  // Try TPB first (cloudscraper), then DHT
+  let torrents = await searchTPB(query, 0); // category 0 = all (we rely on API, but filter is optional)
   if (!torrents.length) {
-    torrents = await searchTorrentProject(query);
+    torrents = await searchDHT(query);
   }
 
-  // Second fallback
+  // Fallback search term if nothing found
   if (!torrents.length && query === "1080p") {
     console.log("Fallback search '2024'");
-    torrents = await searchDHT("2024");
-    if (!torrents.length) torrents = await searchTorrentProject("2024");
+    torrents = await searchTPB("2024", 0);
+    if (!torrents.length) torrents = await searchDHT("2024");
   }
 
   return torrents.map(t => {
