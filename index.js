@@ -1,7 +1,6 @@
 const express = require("express");
 const fetch = require("node-fetch");
 const pLimit = require("p-limit");
-const cloudscraper = require("cloudscraper");
 
 // ===================== CONFIG =====================
 const GENRES = [
@@ -9,23 +8,23 @@ const GENRES = [
   "Horror", "Sci-Fi", "Thriller", "Documentary", "Adult (XXX)"
 ];
 
-// Pirate Bay mirrors (all accessed via cloudscraper to bypass Cloudflare)
-const TPB_MIRRORS = [
-  "https://apibay.org",
-  "https://tpb.party/apibay",
-  "https://tpb23.ukpass.co/apibay"
-];
+// TorrentProject is a simple JSON API (no Cloudflare)
+const TORRENT_PROJECT_URL = "https://torrentproject.cc";
 
-const CATEGORY_MAP = {
-  movie: 201,
-  series: 205,
-  other: 200
+// SolidTorrents as fallback
+const SOLID_TORRENTS_URL = "https://solidtorrents.net/api/v1/search";
+
+// Category mapping for SolidTorrents (TorrentProject uses generic search)
+const SOLID_CAT_MAP = {
+  movie: "movies",
+  series: "tv",
+  other: "videos"
 };
 
 const MANIFEST = {
   id: "community.rawstreamer.config",
-  version: "1.2.0",
-  name: "Raw Torrent Streamer (configurable)",
+  version: "2.0.0",
+  name: "Raw Torrent Streamer",
   description: "Unfiltered torrent catalog with Real-Debrid. Use the web config page to set your API key.",
   resources: ["catalog", "stream"],
   types: ["movie", "series", "other"],
@@ -116,35 +115,47 @@ app.get("/", (req, res) => {
   `);
 });
 
-// ===================== TORRENT SEARCH (using cloudscraper) =====================
-async function searchTPB(query, category) {
-  for (const base of TPB_MIRRORS) {
-    try {
-      const url = `${base}/q.php?q=${encodeURIComponent(query)}&cat=${category || 0}`;
-      console.log(`Trying TPB (cloudscraper): ${url}`);
-      // cloudscraper returns the page body directly as a string
-      const body = await cloudscraper.get(url);
-      const data = JSON.parse(body);
-      if (Array.isArray(data) && data.length > 0 && data[0].id !== "0") {
-        console.log(`TPB success: ${data.length} torrents from ${base}`);
-        return data;
-      }
-    } catch (err) {
-      console.log(`TPB mirror ${base} failed: ${err.message}`);
+// ===================== TORRENT SEARCH =====================
+
+// TorrentProject API – returns JSON directly, no Cloudflare
+async function searchTorrentProject(query) {
+  try {
+    const url = `${TORRENT_PROJECT_URL}/?q=${encodeURIComponent(query)}&out=json&orderby=seeders`;
+    console.log(`Trying TorrentProject: ${url}`);
+    const resp = await fetch(url, {
+      headers: { 'User-Agent': 'Mozilla/5.0' },
+      timeout: 8000
+    });
+    const text = await resp.text();
+    // The API returns JSON, but sometimes wrapped in a callback? It's raw JSON.
+    const data = JSON.parse(text);
+    if (Array.isArray(data) && data.length > 0) {
+      console.log(`TorrentProject returned ${data.length} results`);
+      return data.map(item => ({
+        info_hash: item.hash,
+        name: item.title,
+        size: parseInt(item.size) || 0,
+        seeders: parseInt(item.seeders) || 0,
+        added: item.added ? Math.floor(new Date(item.added).getTime() / 1000) : 0
+      }));
     }
+  } catch (err) {
+    console.log(`TorrentProject failed: ${err.message}`);
   }
   return [];
 }
 
-// Fallback: SolidTorrents (also with cloudscraper if needed, but it's usually JSON)
+// SolidTorrents as fallback (works from many datacenters)
 async function searchSolidTorrents(query, type) {
-  const catMap = { movie: "movies", series: "tv", other: "videos" };
-  const cat = catMap[type] || "all";
+  const cat = SOLID_CAT_MAP[type] || "all";
   try {
-    const url = `https://solidtorrents.net/api/v1/search?q=${encodeURIComponent(query)}&category=${cat}&sort=seeders`;
+    const url = `${SOLID_TORRENTS_URL}?q=${encodeURIComponent(query)}&category=${cat}&sort=seeders`;
     console.log(`Trying SolidTorrents: ${url}`);
-    const body = await cloudscraper.get(url);   // cloudscraper just in case
-    const json = JSON.parse(body);
+    const resp = await fetch(url, {
+      headers: { 'User-Agent': 'Mozilla/5.0' },
+      timeout: 8000
+    });
+    const json = await resp.json();
     if (json.results && json.results.length > 0) {
       console.log(`SolidTorrents returned ${json.results.length} results`);
       return json.results.map(item => ({
@@ -152,7 +163,7 @@ async function searchSolidTorrents(query, type) {
         name: item.title,
         size: item.size,
         seeders: item.seeders,
-        added: item.added ? Math.floor(new Date(item.added).getTime() / 1000) : Math.floor(Date.now() / 1000)
+        added: item.added ? Math.floor(new Date(item.added).getTime() / 1000) : 0
       }));
     }
   } catch (err) {
@@ -174,14 +185,16 @@ async function handleCatalog(type, id, extra = {}) {
   // Default search term so catalogs aren't empty
   if (!query) query = "1080p";
 
-  let torrents = await searchTPB(query, CATEGORY_MAP[type]);
+  // Try TorrentProject first (fast, no Cloudflare)
+  let torrents = await searchTorrentProject(query);
+  // Then SolidTorrents
   if (!torrents.length) {
     torrents = await searchSolidTorrents(query, type);
   }
-  // Second fallback if nothing
+  // Fallback: try a different broad term if still nothing
   if (!torrents.length && query === "1080p") {
-    console.log("Fallback to '2024'");
-    torrents = await searchTPB("2024", CATEGORY_MAP[type]);
+    console.log("Fallback search '2024'");
+    torrents = await searchTorrentProject("2024");
     if (!torrents.length) torrents = await searchSolidTorrents("2024", type);
   }
 
