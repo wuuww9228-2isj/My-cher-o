@@ -1,0 +1,12 @@
+{
+  "name": "stremio-raw-addon",
+  "version": "1.0.0",
+  "scripts": {
+    "start": "node index.js"
+  },
+  "dependencies": {
+    "express": "^4.18.2",
+    "node-fetch": "^2.6.7",
+    "p-limit": "^3.1.0"
+  }
+}
