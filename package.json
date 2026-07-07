@@ -5,7 +5,6 @@
     "scrape": "node scrape.js"
   },
   "dependencies": {
-    "cloudscraper": "^4.6.0",
-    "request": "^2.88.2"
+    "node-fetch": "^2.6.7"
   }
 }
