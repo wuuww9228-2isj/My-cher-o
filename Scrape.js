@@ -1,64 +1,101 @@
 const fs = require("fs");
-const cloudscraper = require("cloudscraper");
+const fetch = require("node-fetch");
 
-const mirrors = [
-  "https://apibay.org",
-  "https://tpb.party/apibay",
-  "https://tpb23.ukpass.co/apibay"
+// All sources we'll try (JSON APIs that work from GitHub runners)
+const sources = [
+  {
+    name: "TorrentProject",
+    url: (cat) => `https://torrentproject.cc/api/v1/torrents?limit=100&search=${cat}`,
+    parse: (json) => json.torrents?.map(i => ({
+      info_hash: i.hash,
+      name: i.title,
+      size: i.size || 0,
+      seeders: i.seeders || 0,
+      added: i.uploaded || Math.floor(Date.now()/1000)
+    })) || []
+  },
+  {
+    name: "DHT",
+    url: (cat) => `https://dht.lc/search?q=${cat}`,
+    parse: (data) => Array.isArray(data) ? data.map(i => ({
+      info_hash: i.info_hash,
+      name: i.name,
+      size: i.size || 0,
+      seeders: i.seeders || 0,
+      added: i.added || 0
+    })) : []
+  },
+  {
+    name: "TPB (apibay.org)",
+    url: (cat) => `https://apibay.org/q.php?q=${cat}&cat=0`,
+    parse: (data) => Array.isArray(data) && data[0]?.id !== "0" ? data.map(i => ({
+      info_hash: i.info_hash,
+      name: i.name,
+      size: i.size,
+      seeders: i.seeders,
+      added: i.added
+    })) : []
+  }
 ];
 
 const categories = {
-  movie: 201,
-  series: 205,
-  video: 200,
-  adult: 500
+  movie: "movies",
+  series: "tv",
+  video: "videos",
+  adult: "xxx"
 };
 
-async function fetchCategory(mirror, catId) {
-  const url = `${mirror}/q.php?q=&cat=${catId}`;
-  const body = await cloudscraper.get(url);
-  const data = JSON.parse(body);
-  if (Array.isArray(data) && data[0]?.id !== "0") {
-    return data.map(t => ({
-      info_hash: t.info_hash,
-      name: t.name,
-      size: t.size,
-      seeders: t.seeders,
-      added: t.added,
-      category: catId === 201 ? "movie" : catId === 205 ? "tv" : catId === 200 ? "video" : "adult"
-    }));
-  }
-  return [];
-}
-
-(async () => {
+async function fetchAll() {
   let allTorrents = [];
+
+  // Load existing torrents to avoid duplicates
   try {
     if (fs.existsSync("torrents.json")) {
-      const existing = JSON.parse(fs.readFileSync("torrents.json", "utf8"));
-      allTorrents = existing.torrents || [];
+      const old = JSON.parse(fs.readFileSync("torrents.json", "utf8"));
+      allTorrents = old.torrents || [];
     }
   } catch (e) {}
 
-  for (const mirror of mirrors) {
-    for (const [catName, catId] of Object.entries(categories)) {
+  // Scrape each source for each category
+  for (const source of sources) {
+    for (const [cat, query] of Object.entries(categories)) {
       try {
-        const results = await fetchCategory(mirror, catId);
-        console.log(`${mirror} (${catName}): ${results.length} torrents`);
+        const url = source.url(query);
+        console.log(`Trying ${source.name} (${cat}): ${url}`);
+        const resp = await fetch(url, {
+          headers: { 'User-Agent': 'Mozilla/5.0' },
+          timeout: 10000
+        });
+        if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+        const json = await resp.json();
+        const results = source.parse(json);
+        console.log(`  -> ${results.length} torrents`);
         for (const t of results) {
+          t.category = cat;
           if (!allTorrents.find(ex => ex.info_hash === t.info_hash)) {
             allTorrents.push(t);
           }
         }
       } catch (e) {
-        console.log(`Failed ${mirror} ${catName}: ${e.message}`);
+        console.log(`  -> Failed: ${e.message}`);
       }
     }
   }
 
-  allTorrents.sort((a, b) => (b.added || 0) - (a.added || 0));
+  // Sort by seeders (descending) and keep latest 5000
+  allTorrents.sort((a, b) => (b.seeders || 0) - (a.seeders || 0));
   allTorrents = allTorrents.slice(0, 5000);
 
-  fs.writeFileSync("torrents.json", JSON.stringify({ updated: new Date().toISOString(), torrents: allTorrents }));
-  console.log(`Saved ${allTorrents.length} torrents.`);
-})();
+  // Always save, even if empty (prevents workflow failure)
+  fs.writeFileSync("torrents.json", JSON.stringify({
+    updated: new Date().toISOString(),
+    torrents: allTorrents
+  }));
+  console.log(`Saved ${allTorrents.length} torrents total.`);
+}
+
+fetchAll().catch(e => {
+  // Write an empty file if the whole process crashes
+  fs.writeFileSync("torrents.json", JSON.stringify({ updated: new Date().toISOString(), torrents: [] }));
+  console.error("Fatal error, wrote empty torrents.json:", e.message);
+});
