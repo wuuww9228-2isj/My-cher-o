@@ -1,0 +1,11 @@
+{
+  "name": "raw-torrent-feed",
+  "private": true,
+  "scripts": {
+    "scrape": "node scrape.js"
+  },
+  "dependencies": {
+    "cloudscraper": "^4.6.0",
+    "request": "^2.88.2"
+  }
+}
