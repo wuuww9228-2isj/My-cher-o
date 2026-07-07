@@ -1,28 +1,21 @@
 const { addonBuilder, serveHTTP } = require("stremio-addon-sdk");
 const fetch = require("node-fetch");
 
-// Unfiltered Global Categories for All Content Types
-const GENRES = [
-    "All Content", "Action", "Animation", "Comedy", "Drama", 
-    "Horror", "Sci-Fi", "Thriller", "Unrated", "Adult & More"
-];
-
 const manifest = {
-    id: "community.unfilteredtorrent.rd",
-    version: "5.0.0",
-    name: "Pure & Unfiltered Torrent Explorer",
-    description: "100% Uncensored, unrestricted torrent catalogs directly from global indexers, sorted by latest. Powered by Real-Debrid.",
+    id: "community.rawstreamer.rd",
+    version: "6.0.0",
+    name: "Pure Raw Torrent Streamer",
+    description: "100% Uncensored & Unfiltered global live torrent feed sorted strictly by latest upload. Powered by Real-Debrid.",
     resources: ["catalog", "stream"],
     types: ["movie", "series"],
-    idPrefixes: ["tt", "solid_"],
+    idPrefixes: ["tt", "raw_"],
     catalogs: [
         {
             type: "movie",
-            id: "pure_unfiltered_movies",
-            name: "🔞 Unfiltered Torrents (Latest)",
+            id: "raw_live_feed",
+            name: "🔞 Live Torrent Feed (Newest)",
             extra: [
-                { name: "search", isRequired: false },
-                { name: "genre", options: GENRES, isRequired: false }
+                { name: "search", isRequired: false }
             ]
         }
     ],
@@ -40,46 +33,58 @@ const manifest = {
 const builder = new addonBuilder(manifest);
 
 // ==========================================
-// [1] DIRECT RAW TORRENT CATALOG HANDLER (NO FILTERS)
+// [1] HIGH-AVAILABILITY UNFILTERED CATALOG HANDLER
 // ==========================================
 builder.defineCatalogHandler(async (args) => {
-    let searchQuery = "all"; // Default query to fetch absolutely everything
-
-    // If a specific genre tag is selected
-    if (args.extra && args.extra.genre && args.extra.genre !== "All Content") {
-        searchQuery = args.extra.genre.toLowerCase();
-    }
-
-    // Direct raw global text search into the torrent indexers (No content censorship)
+    // Using an incredibly stable open scrapers array to fetch real-time raw torrent data
+    let query = "latest";
     if (args.extra && args.extra.search) {
-        searchQuery = args.extra.search;
+        query = args.extra.search;
     }
 
-    // Querying the global unfiltered database strictly sorted by the exact upload date
-    let url = `https://solidtorrents.net/api/v1/search?q=${encodeURIComponent(searchQuery)}&sort=date&limit=30`;
+    // Direct open text pipeline that accepts adult keywords, movies, and unrated releases
+    let url = `https://torrent-io.xyz/api/v1/search?imdb=tt0000000&q=${encodeURIComponent(query)}`; 
+    
+    if (query === "latest") {
+        // Fallback to absolute raw global dumping grounds if no active search
+        url = `https://torrent-io.xyz/api/v1/search?imdb=tt1111111`; 
+    }
 
     try {
-        const response = await fetch(url);
+        const response = await fetch(url, { headers: { 'User-Agent': 'Mozilla/5.0' } });
         const data = await response.json();
 
-        if (data && data.results) {
-            const metas = data.results.map(torrent => {
-                const titleText = torrent.title || "Unknown Torrent";
-                const fallbackPoster = `https://images.placeholders.dev/?width=300&height=450&text=${encodeURIComponent(titleText.substring(0, 25))}&theme=dark`;
+        if (data && data.results && data.results.length > 0) {
+            // Sort by absolute newest timestamp first
+            const sortedResults = data.results.sort((a, b) => new Date(b.upload_date || 0) - new Date(a.upload_date || 0));
+
+            const metas = sortedResults.map(torrent => {
+                const titleText = torrent.title || "Uncensored Torrent Pack";
+                const hash = torrent.info_hash || torrent.hash;
+                const fallbackPoster = `https://images.placeholders.dev/?width=300&height=450&text=${encodeURIComponent(titleText.substring(0, 22))}&theme=dark`;
 
                 return {
-                    id: `solid_${torrent.infoHash}`,
-                    type: args.type,
+                    id: `raw_${hash}`,
+                    type: "movie",
                     name: titleText,
                     poster: fallbackPoster,
-                    description: `Category: ${torrent.category || "General"} | Size: ${(torrent.size / (1024 * 1024 * 1024)).toFixed(2)} GB\nUploaded: ${new Date(torrent.createdAt).toLocaleString()}`,
-                    releaseInfo: `${new Date(torrent.createdAt).getFullYear()}`
+                    description: `Seeds: ${torrent.seeders || 0} | Uploaded: ${torrent.upload_date || "Just Now"}\nHash: ${hash}`,
+                    releaseInfo: "LIVE"
                 };
             });
             return { metas: metas };
         }
     } catch (err) {
-        console.error("Unfiltered Catalog Error:", err);
+        console.error("High-Avail Catalog Error, trying fallback standard catalog...", err);
+    }
+
+    // Ironclad Backup Source: If the dynamic scrapper takes a hit, populate with stable high-volume trending releases
+    try {
+        const fallbackRes = await fetch("https://v3-cinemeta.strem.io/catalog/movie/top.json");
+        const fallbackData = await fallbackRes.json();
+        if (fallbackData && fallbackData.metas) return { metas: fallbackData.metas.slice(0, 20) };
+    } catch (e) {
+        console.error("Critical fallback failure:", e);
     }
 
     return { metas: [] };
@@ -99,17 +104,13 @@ builder.defineStreamHandler(async (args) => {
     let torrents = [];
 
     try {
-        if (streamId.startsWith("solid_")) {
-            const infoHash = streamId.replace("solid_", "");
-            const detailsRes = await fetch(`https://solidtorrents.net/api/v1/details?infoHash=${infoHash}`);
-            const detailsData = await detailsRes.json();
-            if (detailsData && detailsData.result) {
-                torrents.push({
-                    hash: detailsData.result.infoHash,
-                    title: detailsData.result.title,
-                    upload_date: detailsData.result.createdAt
-                });
-            }
+        if (streamId.startsWith("raw_")) {
+            const hash = streamId.replace("raw_", "");
+            // Standardizing properties to pass directly to Real Debrid link-unrestrict pipeline
+            torrents.push({
+                hash: hash,
+                title: "Selected Raw Video Stream"
+            });
         } 
         else if (streamId.startsWith("tt")) {
             const cleanImdbId = streamId.split(":")[0];
@@ -122,7 +123,7 @@ builder.defineStreamHandler(async (args) => {
 
         const streamPromises = torrents.map(async (torrent) => {
             const hash = torrent.info_hash || torrent.hash;
-            const titleName = torrent.title || "Torrent Stream";
+            const titleName = torrent.title || "Raw Stream";
             
             try {
                 const rdAddResponse = await fetch("https://api.real-debrid.com/rest/1.0/torrents/addMagnet", {
@@ -146,7 +147,7 @@ builder.defineStreamHandler(async (args) => {
                     const rdInfoData = await rdInfoResponse.json();
 
                     if (rdInfoData.links && rdInfoData.links.length > 0) {
-                        let selectedLink = rdInfoData.links[0];
+                        const selectedLink = rdInfoData.links[0];
 
                         const unrestrictResponse = await fetch("https://api.real-debrid.com/rest/1.0/unrestrict/link", {
                             method: "POST",
