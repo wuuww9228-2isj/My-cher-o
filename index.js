@@ -8,13 +8,14 @@ const GENRES = [
   "Horror", "Sci-Fi", "Thriller", "Documentary", "Adult (XXX)"
 ];
 
-// No Cloudflare – works from any Render region
+// TorrentProject API – no Cloudflare, works from Render
 const TORRENTPROJECT_API = "https://torrentproject.cc/api/v1/torrents";
+// DHT fallback
 const DHT_API = "https://dht.lc/search";
 
 const MANIFEST = {
   id: "community.rawstreamer.config",
-  version: "7.0.0",
+  version: "8.0.0",
   name: "Raw Torrent Streamer",
   description: "Unfiltered latest torrents (Movies, Series, Videos) via Real-Debrid.",
   resources: ["catalog", "stream"],
@@ -81,7 +82,7 @@ app.get("/", (req, res) => {
     </head>
     <body>
       <h2>⚙️ Configure Your Add-on</h2>
-      <p>Paste your Real-Debrid API token (<a href="https://real-debrid.com/apitoken" target="_blank">get it here</a>)</p>
+      <p>Paste your Real-Debrid API token below (<a href="https://real-debrid.com/apitoken" target="_blank">get it here</a>)</p>
       <input type="text" id="apikey" placeholder="Paste your RD API key" oninput="updateLink()" />
       <div id="result"></div>
       <script>
@@ -107,7 +108,7 @@ app.get("/", (req, res) => {
 
 // ===================== TORRENT SEARCH =====================
 
-// TorrentProject – returns latest torrents, accepts query, no Cloudflare
+// TorrentProject – returns latest torrents, accepts query
 async function searchTorrentProject(query) {
   try {
     const params = new URLSearchParams();
@@ -136,7 +137,7 @@ async function searchTorrentProject(query) {
   return [];
 }
 
-// Fallback: DHT search (no Cloudflare)
+// DHT fallback (no Cloudflare)
 async function searchDHT(query) {
   try {
     const url = `${DHT_API}?q=${encodeURIComponent(query || "1080p")}`;
@@ -178,14 +179,13 @@ async function handleCatalog(type, id, extra = {}) {
   if (!torrents.length) {
     torrents = await searchDHT(query);
   }
-
-  // If still nothing, try a generic fallback
+  // Last resort fallback
   if (!torrents.length) {
     console.log("Trying fallback search '1080p'");
     torrents = await searchDHT("1080p");
   }
 
-  // Filter and map to Stremio meta (strict null removal)
+  // Strict filter and map to Stremio meta
   return torrents
     .filter(t => t && t.info_hash)
     .map(t => {
@@ -273,7 +273,7 @@ async function handleStream(streamId, rdApiKey) {
   return streams.filter(s => s && s.url);
 }
 
-// ===================== ROUTES (bulletproof trailing‑slash handling) =====================
+// ===================== ROUTES (accept both with and without trailing slash) =====================
 app.get("/manifest.json", (req, res) => {
   res.json({ error: "Please configure via the web page at /" });
 });
