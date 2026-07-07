@@ -8,22 +8,15 @@ const GENRES = [
   "Horror", "Sci-Fi", "Thriller", "Documentary", "Adult (XXX)"
 ];
 
-// TorrentProject is a simple JSON API (no Cloudflare)
-const TORRENT_PROJECT_URL = "https://torrentproject.cc";
+// Primary torrent source (DHT search, JSON API, no Cloudflare)
+const DHT_API = "https://dht.lc/search";
 
-// SolidTorrents as fallback
-const SOLID_TORRENTS_URL = "https://solidtorrents.net/api/v1/search";
-
-// Category mapping for SolidTorrents (TorrentProject uses generic search)
-const SOLID_CAT_MAP = {
-  movie: "movies",
-  series: "tv",
-  other: "videos"
-};
+// Fallback: TorrentProject (alternative API)
+const TP_API = "https://torrentproject.cc/api/v1/torrents";
 
 const MANIFEST = {
   id: "community.rawstreamer.config",
-  version: "2.0.0",
+  version: "3.0.0",
   name: "Raw Torrent Streamer",
   description: "Unfiltered torrent catalog with Real-Debrid. Use the web config page to set your API key.",
   resources: ["catalog", "stream"],
@@ -73,7 +66,7 @@ app.use((req, res, next) => {
   next();
 });
 
-// ===================== CONFIGURATION PAGE =====================
+// ===================== CONFIGURATION PAGE (simplified) =====================
 app.get("/", (req, res) => {
   res.send(`
     <!DOCTYPE html>
@@ -94,80 +87,73 @@ app.get("/", (req, res) => {
       <p>Enter your Real-Debrid API token (<a href="https://real-debrid.com/apitoken" target="_blank">get it here</a>)</p>
       <input type="text" id="apikey" placeholder="Paste your RD API key" />
       <br/>
-      <button onclick="generate()">Generate Install Link</button>
+      <button id="generateBtn">Generate Install Link</button>
       <div id="result" style="margin-top:1.5rem;"></div>
       <script>
-        function generate() {
-          const key = document.getElementById("apikey").value.trim();
-          if (!key) return alert("Please enter your API key");
-          const base = window.location.origin;
-          const installLink = base + "/" + key + "/manifest.json";
-          document.getElementById("result").innerHTML = 
+        document.getElementById("generateBtn").addEventListener("click", function() {
+          var key = document.getElementById("apikey").value.trim();
+          if (!key) {
+            alert("Please enter your API key");
+            return;
+          }
+          var installLink = window.location.origin + "/" + key + "/manifest.json";
+          document.getElementById("result").innerHTML =
             "<div class='link'>" +
             "<strong>Your Stremio install link:</strong><br/>" +
             "<code>" + installLink + "</code><br/><br/>" +
             "<button onclick=\"navigator.clipboard.writeText('" + installLink + "')\">📋 Copy to Clipboard</button>" +
             "</div>";
-        }
+        });
       </script>
     </body>
     </html>
   `);
 });
 
-// ===================== TORRENT SEARCH =====================
+// ===================== TORRENT SEARCH FUNCTIONS =====================
 
-// TorrentProject API – returns JSON directly, no Cloudflare
-async function searchTorrentProject(query) {
+// 1. DHT search (always returns JSON, no blocking)
+async function searchDHT(query) {
   try {
-    const url = `${TORRENT_PROJECT_URL}/?q=${encodeURIComponent(query)}&out=json&orderby=seeders`;
-    console.log(`Trying TorrentProject: ${url}`);
-    const resp = await fetch(url, {
-      headers: { 'User-Agent': 'Mozilla/5.0' },
-      timeout: 8000
-    });
-    const text = await resp.text();
-    // The API returns JSON, but sometimes wrapped in a callback? It's raw JSON.
-    const data = JSON.parse(text);
+    const url = `${DHT_API}?q=${encodeURIComponent(query)}`;
+    console.log(`Trying DHT: ${url}`);
+    const resp = await fetch(url, { headers: { 'User-Agent': 'Mozilla/5.0' } });
+    const data = await resp.json();
     if (Array.isArray(data) && data.length > 0) {
-      console.log(`TorrentProject returned ${data.length} results`);
+      console.log(`DHT returned ${data.length} results`);
       return data.map(item => ({
-        info_hash: item.hash,
-        name: item.title,
-        size: parseInt(item.size) || 0,
-        seeders: parseInt(item.seeders) || 0,
-        added: item.added ? Math.floor(new Date(item.added).getTime() / 1000) : 0
+        info_hash: item.info_hash,
+        name: item.name,
+        size: item.size || 0,
+        seeders: item.seeders || 0,
+        added: item.added || 0
       }));
     }
   } catch (err) {
-    console.log(`TorrentProject failed: ${err.message}`);
+    console.log(`DHT failed: ${err.message}`);
   }
   return [];
 }
 
-// SolidTorrents as fallback (works from many datacenters)
-async function searchSolidTorrents(query, type) {
-  const cat = SOLID_CAT_MAP[type] || "all";
+// 2. TorrentProject fallback (new API)
+async function searchTorrentProject(query) {
   try {
-    const url = `${SOLID_TORRENTS_URL}?q=${encodeURIComponent(query)}&category=${cat}&sort=seeders`;
-    console.log(`Trying SolidTorrents: ${url}`);
-    const resp = await fetch(url, {
-      headers: { 'User-Agent': 'Mozilla/5.0' },
-      timeout: 8000
-    });
+    const url = `${TP_API}?search=${encodeURIComponent(query)}&sort=seeders&limit=100`;
+    console.log(`Trying TorrentProject: ${url}`);
+    const resp = await fetch(url, { headers: { 'User-Agent': 'Mozilla/5.0' } });
     const json = await resp.json();
-    if (json.results && json.results.length > 0) {
-      console.log(`SolidTorrents returned ${json.results.length} results`);
-      return json.results.map(item => ({
-        info_hash: item.info_hash,
+    if (json.torrents && json.torrents.length > 0) {
+      console.log(`TorrentProject returned ${json.torrents.length} results`);
+      return json.torrents.map(item => ({
+        info_hash: item.hash,
         name: item.title,
-        size: item.size,
-        seeders: item.seeders,
-        added: item.added ? Math.floor(new Date(item.added).getTime() / 1000) : 0
+        size: item.size || 0,
+        seeders: item.seeders || 0,
+        added: item.uploaded || 0
       }));
     }
   } catch (err) {
-    console.log(`SolidTorrents failed: ${err.message}`);
+    console.log(`TorrentProject failed: ${err.message}`);
   }
   return [];
 }
@@ -182,20 +168,19 @@ async function handleCatalog(type, id, extra = {}) {
     query = extra.genre === "Adult (XXX)" ? "XXX" : extra.genre;
   }
 
-  // Default search term so catalogs aren't empty
-  if (!query) query = "1080p";
+  if (!query) query = "1080p";   // default feed
 
-  // Try TorrentProject first (fast, no Cloudflare)
-  let torrents = await searchTorrentProject(query);
-  // Then SolidTorrents
+  // Try DHT first, then TorrentProject
+  let torrents = await searchDHT(query);
   if (!torrents.length) {
-    torrents = await searchSolidTorrents(query, type);
+    torrents = await searchTorrentProject(query);
   }
-  // Fallback: try a different broad term if still nothing
+
+  // Second fallback
   if (!torrents.length && query === "1080p") {
     console.log("Fallback search '2024'");
-    torrents = await searchTorrentProject("2024");
-    if (!torrents.length) torrents = await searchSolidTorrents("2024", type);
+    torrents = await searchDHT("2024");
+    if (!torrents.length) torrents = await searchTorrentProject("2024");
   }
 
   return torrents.map(t => {
