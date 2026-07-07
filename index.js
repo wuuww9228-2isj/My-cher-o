@@ -2,7 +2,7 @@ const express = require("express");
 const fetch = require("node-fetch");
 const pLimit = require("p-limit");
 
-// --------------- CONFIG ---------------
+// ===================== CONFIG =====================
 const GENRES = [
   "All Content", "Action", "Animation", "Comedy", "Drama",
   "Horror", "Sci-Fi", "Thriller", "Documentary", "Adult (XXX)"
@@ -22,12 +22,12 @@ const CATEGORY_MAP = {
   other: 200     // Video/VOD
 };
 
-// --------------- MANIFEST ---------------
+// Manifest (no configurable flag – user configures via our web page)
 const MANIFEST = {
-  id: "community.rawstreamer.rd",
+  id: "community.rawstreamer.config",
   version: "1.0.0",
-  name: "Raw Torrent Streamer",
-  description: "Unfiltered torrent catalog (Movies, Series, Videos) via Real-Debrid",
+  name: "Raw Torrent Streamer (configurable)",
+  description: "Unfiltered torrent catalog with Real-Debrid. Use the web config page to set your API key.",
   resources: ["catalog", "stream"],
   types: ["movie", "series", "other"],
   idPrefixes: ["tt", "raw_"],
@@ -59,11 +59,10 @@ const MANIFEST = {
         { name: "genre", options: GENRES, isRequired: false }
       ]
     }
-  ],
-  configurable: false
+  ]
 };
 
-// --------------- EXPRESS SETUP ---------------
+// ===================== EXPRESS SETUP =====================
 const app = express();
 app.use((req, res, next) => {
   res.header("Access-Control-Allow-Origin", "*");
@@ -71,22 +70,62 @@ app.use((req, res, next) => {
   next();
 });
 
-// Log every request (useful for Render logs)
+// Log requests for debugging
 app.use((req, res, next) => {
   console.log(`${new Date().toISOString()} ${req.method} ${req.url}`);
   next();
 });
 
-// --------------- TORRENT SEARCH ---------------
-// Search across all TPB mirrors, return raw data from first successful one
+// ===================== CONFIGURATION PAGE =====================
+app.get("/", (req, res) => {
+  res.send(`
+    <!DOCTYPE html>
+    <html>
+    <head>
+      <meta charset="utf-8">
+      <title>Raw Torrent Streamer – Setup</title>
+      <style>
+        body { font-family: Arial, sans-serif; background: #1e1e1e; color: #eee; padding: 2rem; text-align: center; }
+        input { padding: 0.75rem; width: 300px; margin: 1rem 0; border: none; border-radius: 6px; }
+        button { padding: 0.75rem 2rem; background: #e50914; color: white; border: none; border-radius: 6px; cursor: pointer; }
+        .link { background: #333; padding: 1rem; border-radius: 8px; word-break: break-all; margin: 1rem auto; max-width: 600px; }
+        a { color: #e50914; }
+      </style>
+    </head>
+    <body>
+      <h2>⚙️ Configure Your Add-on</h2>
+      <p>Enter your Real-Debrid API token (<a href="https://real-debrid.com/apitoken" target="_blank">get it here</a>)</p>
+      <input type="text" id="apikey" placeholder="Paste your RD API key" />
+      <br/>
+      <button onclick="generate()">Generate Install Link</button>
+      <div id="result" style="margin-top:1.5rem;"></div>
+      <script>
+        function generate() {
+          const key = document.getElementById("apikey").value.trim();
+          if (!key) return alert("Please enter your API key");
+          const base = window.location.origin;
+          const installLink = base + "/" + key + "/manifest.json";
+          document.getElementById("result").innerHTML = 
+            "<div class='link'>" +
+            "<strong>Your Stremio install link:</strong><br/>" +
+            "<code>" + installLink + "</code><br/><br/>" +
+            "<button onclick=\"navigator.clipboard.writeText('" + installLink + "')\">📋 Copy to Clipboard</button>" +
+            "</div>";
+        }
+      </script>
+    </body>
+    </html>
+  `);
+});
+
+// ===================== TORRENT SEARCH =====================
 async function searchTPB(query, category) {
   for (const base of TPB_MIRRORS) {
     try {
       const url = `${base}/q.php?q=${encodeURIComponent(query)}&cat=${category || 0}`;
-      console.log(`Trying TPB mirror: ${base}`);
+      console.log(`Trying TPB: ${base}`);
       const resp = await fetch(url, { headers: { 'User-Agent': 'Mozilla/5.0' } });
       const data = await resp.json();
-      // TPB returns an array where the first item has id "0" if no results
       if (Array.isArray(data) && data.length > 0 && data[0].id !== "0") {
         console.log(`TPB success: ${data.length} torrents from ${base}`);
         return data;
@@ -98,7 +137,6 @@ async function searchTPB(query, category) {
   return [];
 }
 
-// Fallback: SolidTorrents (aggregates many public trackers)
 async function searchSolidTorrents(query, type) {
   const catMap = { movie: "movies", series: "tv", other: "videos" };
   const cat = catMap[type] || "all";
@@ -109,7 +147,6 @@ async function searchSolidTorrents(query, type) {
     const json = await resp.json();
     if (json.results && json.results.length > 0) {
       console.log(`SolidTorrents returned ${json.results.length} results`);
-      // Convert to TPB-like format for uniform mapping
       return json.results.map(item => ({
         info_hash: item.info_hash,
         name: item.title,
@@ -124,9 +161,8 @@ async function searchSolidTorrents(query, type) {
   return [];
 }
 
-// --------------- CATALOG HANDLER ---------------
+// ===================== CATALOG HANDLER =====================
 async function handleCatalog(type, id, extra = {}) {
-  // Determine search term
   let query = "";
   if (extra.search) {
     query = extra.search;
@@ -134,13 +170,11 @@ async function handleCatalog(type, id, extra = {}) {
     query = extra.genre === "Adult (XXX)" ? "XXX" : extra.genre;
   }
 
-  // Try TPB first, then SolidTorrents
   let torrents = await searchTPB(query, CATEGORY_MAP[type]);
   if (!torrents.length) {
     torrents = await searchSolidTorrents(query, type);
   }
 
-  // Map to Stremio meta format
   return torrents.map(t => {
     const hash = t.info_hash;
     const name = t.name || "Unknown";
@@ -157,20 +191,16 @@ async function handleCatalog(type, id, extra = {}) {
   });
 }
 
-// --------------- STREAM HANDLER ---------------
+// ===================== STREAM HANDLER (Real-Debrid) =====================
 async function handleStream(streamId, rdApiKey) {
   if (!rdApiKey) {
     return [{ title: "⚠️ Real-Debrid API key missing", url: "" }];
   }
 
   let torrents = [];
-
-  // Our own feed hash
   if (streamId.startsWith("raw_")) {
     torrents.push({ infoHash: streamId.replace("raw_", ""), title: "Feed stream" });
-  }
-  // IMDB ID (from Stremio search)
-  else if (streamId.startsWith("tt")) {
+  } else if (streamId.startsWith("tt")) {
     try {
       const imdb = streamId.split(":")[0];
       const res = await fetch(`https://torrentio.strem.fun/api/search?imdb=${imdb}`, {
@@ -186,13 +216,12 @@ async function handleStream(streamId, rdApiKey) {
 
   if (!torrents.length) return [];
 
-  // Limit concurrent RD requests
   const limit = pLimit(2);
   const streamPromises = torrents.slice(0, 5).map(torrent =>
     limit(async () => {
       const hash = torrent.infoHash;
       try {
-        // 1. Add magnet
+        // Add magnet to RD
         const addResp = await fetch("https://api.real-debrid.com/rest/1.0/torrents/addMagnet", {
           method: "POST",
           headers: { "Authorization": `Bearer ${rdApiKey}`, "User-Agent": "RawStreamer/1.0" },
@@ -201,21 +230,21 @@ async function handleStream(streamId, rdApiKey) {
         const addData = await addResp.json();
         if (!addData.id) return null;
 
-        // 2. Select all files
+        // Select all files
         await fetch(`https://api.real-debrid.com/rest/1.0/torrents/selectFiles/${addData.id}`, {
           method: "POST",
           headers: { "Authorization": `Bearer ${rdApiKey}`, "User-Agent": "RawStreamer/1.0" },
           body: new URLSearchParams({ files: "all" })
         });
 
-        // 3. Get info
+        // Get file info
         const infoResp = await fetch(`https://api.real-debrid.com/rest/1.0/torrents/info/${addData.id}`, {
           headers: { "Authorization": `Bearer ${rdApiKey}`, "User-Agent": "RawStreamer/1.0" }
         });
         const infoData = await infoResp.json();
         if (!infoData.links || infoData.links.length === 0) return null;
 
-        // 4. Unrestrict first link
+        // Unrestrict first link
         const unrestrictResp = await fetch("https://api.real-debrid.com/rest/1.0/unrestrict/link", {
           method: "POST",
           headers: { "Authorization": `Bearer ${rdApiKey}`, "User-Agent": "RawStreamer/1.0" },
@@ -239,13 +268,17 @@ async function handleStream(streamId, rdApiKey) {
   return streams.filter(Boolean);
 }
 
-// --------------- ROUTES ---------------
-app.get("/", (req, res) => {
-  res.send(`<h2>RawStreamer Add-on is Running</h2><p>Use <code>/YOUR_RD_API_KEY/manifest.json</code> to install in Stremio.</p>`);
+// ===================== ROUTES =====================
+// Base manifest (no API key, just for Stremio to detect the addon? Not used)
+app.get("/manifest.json", (req, res) => {
+  res.json({ error: "Please configure via the web page at /" });
 });
 
-app.get("/manifest.json", (req, res) => res.json(MANIFEST));
-app.get("/:rd_api/manifest.json", (req, res) => res.json(MANIFEST));
+// API-key-specific routes
+app.get("/:rd_api/manifest.json", (req, res) => {
+  // We can validate the key quickly? Not necessary.
+  res.json(MANIFEST);
+});
 
 app.get("/:rd_api/catalog/:type/:id.json", async (req, res) => {
   try {
@@ -267,6 +300,6 @@ app.get("/:rd_api/stream/:type/:id.json", async (req, res) => {
   }
 });
 
-// --------------- START ---------------
+// ===================== START SERVER =====================
 const PORT = process.env.PORT || 7000;
-app.listen(PORT, () => console.log(`✅ RawStreamer listening on port ${PORT}`));
+app.listen(PORT, () => console.log(`✅ RawStreamer config page running on port ${PORT}`));
