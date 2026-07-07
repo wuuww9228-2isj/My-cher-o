@@ -22,7 +22,7 @@ const CATEGORY_MAP = {
 
 const MANIFEST = {
   id: "community.rawstreamer.config",
-  version: "1.0.0",
+  version: "1.1.0",
   name: "Raw Torrent Streamer (configurable)",
   description: "Unfiltered torrent catalog with Real-Debrid. Use the web config page to set your API key.",
   resources: ["catalog", "stream"],
@@ -67,6 +67,7 @@ app.use((req, res, next) => {
   next();
 });
 
+// Log every request (you’ll see exactly what Stremio sends)
 app.use((req, res, next) => {
   console.log(`${new Date().toISOString()} ${req.method} ${req.url}`);
   next();
@@ -119,7 +120,7 @@ async function searchTPB(query, category) {
   for (const base of TPB_MIRRORS) {
     try {
       const url = `${base}/q.php?q=${encodeURIComponent(query)}&cat=${category || 0}`;
-      console.log(`Trying TPB: ${base}`);
+      console.log(`Trying TPB: ${url}`);
       const resp = await fetch(url, { headers: { 'User-Agent': 'Mozilla/5.0' } });
       const data = await resp.json();
       if (Array.isArray(data) && data.length > 0 && data[0].id !== "0") {
@@ -157,18 +158,31 @@ async function searchSolidTorrents(query, type) {
   return [];
 }
 
-// ===================== CATALOG HANDLER =====================
+// ===================== CATALOG HANDLER (with fallback search terms) =====================
 async function handleCatalog(type, id, extra = {}) {
   let query = "";
+
   if (extra.search) {
     query = extra.search;
   } else if (extra.genre && extra.genre !== "All Content") {
     query = extra.genre === "Adult (XXX)" ? "XXX" : extra.genre;
   }
 
+  // If no user input, use a default broad query so catalogs aren’t empty
+  if (!query) {
+    query = "1080p";  // shows a variety of recent HD torrents
+  }
+
   let torrents = await searchTPB(query, CATEGORY_MAP[type]);
   if (!torrents.length) {
     torrents = await searchSolidTorrents(query, type);
+  }
+
+  // Final fallback: try a different default search
+  if (!torrents.length && query === "1080p") {
+    console.log("Trying fallback search term '2024'...");
+    torrents = await searchTPB("2024", CATEGORY_MAP[type]);
+    if (!torrents.length) torrents = await searchSolidTorrents("2024", type);
   }
 
   return torrents.map(t => {
@@ -217,6 +231,7 @@ async function handleStream(streamId, rdApiKey) {
     limit(async () => {
       const hash = torrent.infoHash;
       try {
+        // Add magnet
         const addResp = await fetch("https://api.real-debrid.com/rest/1.0/torrents/addMagnet", {
           method: "POST",
           headers: { "Authorization": `Bearer ${rdApiKey}`, "User-Agent": "RawStreamer/1.0" },
@@ -225,18 +240,21 @@ async function handleStream(streamId, rdApiKey) {
         const addData = await addResp.json();
         if (!addData.id) return null;
 
+        // Select all files
         await fetch(`https://api.real-debrid.com/rest/1.0/torrents/selectFiles/${addData.id}`, {
           method: "POST",
           headers: { "Authorization": `Bearer ${rdApiKey}`, "User-Agent": "RawStreamer/1.0" },
           body: new URLSearchParams({ files: "all" })
         });
 
+        // Get info
         const infoResp = await fetch(`https://api.real-debrid.com/rest/1.0/torrents/info/${addData.id}`, {
           headers: { "Authorization": `Bearer ${rdApiKey}`, "User-Agent": "RawStreamer/1.0" }
         });
         const infoData = await infoResp.json();
         if (!infoData.links || infoData.links.length === 0) return null;
 
+        // Unrestrict first link
         const unrestrictResp = await fetch("https://api.real-debrid.com/rest/1.0/unrestrict/link", {
           method: "POST",
           headers: { "Authorization": `Bearer ${rdApiKey}`, "User-Agent": "RawStreamer/1.0" },
@@ -260,16 +278,17 @@ async function handleStream(streamId, rdApiKey) {
   return streams.filter(Boolean);
 }
 
-// ===================== ROUTES (with trailing-slash fix) =====================
+// ===================== ROUTES (bulletproof trailing slashes) =====================
 app.get("/manifest.json", (req, res) => {
   res.json({ error: "Please configure via the web page at /" });
 });
 
-app.get("/:rd_api/manifest.json/??", (req, res) => {
+// This pattern accepts both `/KEY/manifest.json` and `/KEY/manifest.json/`
+app.get(["/:rd_api/manifest.json", "/:rd_api/manifest.json/"], (req, res) => {
   res.json(MANIFEST);
 });
 
-app.get("/:rd_api/catalog/:type/:id.json/??", async (req, res) => {
+app.get(["/:rd_api/catalog/:type/:id.json", "/:rd_api/catalog/:type/:id.json/"], async (req, res) => {
   try {
     const metas = await handleCatalog(req.params.type, req.params.id, req.query);
     res.json({ metas });
@@ -279,7 +298,7 @@ app.get("/:rd_api/catalog/:type/:id.json/??", async (req, res) => {
   }
 });
 
-app.get("/:rd_api/stream/:type/:id.json/??", async (req, res) => {
+app.get(["/:rd_api/stream/:type/:id.json", "/:rd_api/stream/:type/:id.json/"], async (req, res) => {
   try {
     const streams = await handleStream(req.params.id, req.params.rd_api);
     res.json({ streams });
