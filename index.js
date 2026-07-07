@@ -1,7 +1,6 @@
 const express = require("express");
 const fetch = require("node-fetch");
 const pLimit = require("p-limit");
-const cloudscraper = require("cloudscraper");
 
 // ===================== CONFIG =====================
 const GENRES = [
@@ -9,23 +8,15 @@ const GENRES = [
   "Horror", "Sci-Fi", "Thriller", "Documentary", "Adult (XXX)"
 ];
 
-const TPB_MIRRORS = [
-  "https://apibay.org",
-  "https://tpb.party/apibay"
-];
-
-// TPB category IDs – separates movies, series, videos
-const CATEGORY_MAP = {
-  movie: 201,
-  series: 205,
-  other: 200
-};
+// No Cloudflare – works from any Render region
+const TORRENTPROJECT_API = "https://torrentproject.cc/api/v1/torrents";
+const DHT_API = "https://dht.lc/search";
 
 const MANIFEST = {
   id: "community.rawstreamer.config",
-  version: "6.0.0",
+  version: "7.0.0",
   name: "Raw Torrent Streamer",
-  description: "Unfiltered latest torrents (Movies, Series, Videos) via Real-Debrid. Auto‑config page.",
+  description: "Unfiltered latest torrents (Movies, Series, Videos) via Real-Debrid.",
   resources: ["catalog", "stream"],
   types: ["movie", "series", "other"],
   idPrefixes: ["tt", "raw_"],
@@ -73,7 +64,7 @@ app.use((req, res, next) => {
   next();
 });
 
-// ===================== CONFIG PAGE (auto‑generates link as you type) =====================
+// ===================== CONFIG PAGE (auto‑generates link) =====================
 app.get("/", (req, res) => {
   res.send(`
     <!DOCTYPE html>
@@ -90,7 +81,7 @@ app.get("/", (req, res) => {
     </head>
     <body>
       <h2>⚙️ Configure Your Add-on</h2>
-      <p>Paste your Real-Debrid API token below (<a href="https://real-debrid.com/apitoken" target="_blank">get it here</a>)</p>
+      <p>Paste your Real-Debrid API token (<a href="https://real-debrid.com/apitoken" target="_blank">get it here</a>)</p>
       <input type="text" id="apikey" placeholder="Paste your RD API key" oninput="updateLink()" />
       <div id="result"></div>
       <script>
@@ -115,33 +106,45 @@ app.get("/", (req, res) => {
 });
 
 // ===================== TORRENT SEARCH =====================
-async function searchTPB(query, category) {
-  for (const base of TPB_MIRRORS) {
-    try {
-      // If query is empty, search by category only (returns latest torrents)
-      const params = new URLSearchParams();
-      if (query) params.set("q", query);
-      if (category) params.set("cat", category);
-      const url = `${base}/q.php?${params.toString()}`;
-      console.log(`Trying TPB (cloudscraper): ${url}`);
-      const body = await cloudscraper.get(url);
-      const data = JSON.parse(body);
-      if (Array.isArray(data) && data.length > 0 && data[0].id !== "0") {
-        console.log(`TPB success: ${data.length} torrents`);
-        return data;
-      }
-    } catch (err) {
-      console.log(`TPB mirror ${base} failed: ${err.message}`);
+
+// TorrentProject – returns latest torrents, accepts query, no Cloudflare
+async function searchTorrentProject(query) {
+  try {
+    const params = new URLSearchParams();
+    params.set("limit", "100");
+    if (query) params.set("search", query);
+    const url = `${TORRENTPROJECT_API}?${params.toString()}`;
+    console.log(`Trying TorrentProject: ${url}`);
+    const resp = await fetch(url, {
+      headers: { 'User-Agent': 'Mozilla/5.0' },
+      timeout: 10000
+    });
+    const json = await resp.json();
+    if (json.torrents && json.torrents.length > 0) {
+      console.log(`TorrentProject returned ${json.torrents.length} results`);
+      return json.torrents.map(item => ({
+        info_hash: item.hash,
+        name: item.title,
+        size: item.size || 0,
+        seeders: item.seeders || 0,
+        added: item.uploaded || Math.floor(Date.now() / 1000)
+      }));
     }
+  } catch (err) {
+    console.log(`TorrentProject failed: ${err.message}`);
   }
   return [];
 }
 
+// Fallback: DHT search (no Cloudflare)
 async function searchDHT(query) {
   try {
-    const url = `https://dht.lc/search?q=${encodeURIComponent(query)}`;
+    const url = `${DHT_API}?q=${encodeURIComponent(query || "1080p")}`;
     console.log(`Trying DHT: ${url}`);
-    const resp = await fetch(url, { headers: { 'User-Agent': 'Mozilla/5.0' } });
+    const resp = await fetch(url, {
+      headers: { 'User-Agent': 'Mozilla/5.0' },
+      timeout: 10000
+    });
     const data = await resp.json();
     if (Array.isArray(data) && data.length > 0) {
       console.log(`DHT returned ${data.length} results`);
@@ -163,27 +166,28 @@ async function searchDHT(query) {
 async function handleCatalog(type, id, extra = {}) {
   let query = "";
 
-  // User search overrides everything
   if (extra.search) {
     query = extra.search;
-  }
-  // Otherwise use genre (if not "All Content")
-  else if (extra.genre && extra.genre !== "All Content") {
+  } else if (extra.genre && extra.genre !== "All Content") {
     query = extra.genre === "Adult (XXX)" ? "XXX" : extra.genre;
   }
 
-  // For "latest", leave query empty → TPB will return recent torrents in that category
-  const tpbCat = CATEGORY_MAP[type] || 0;
-
-  // Try TPB (primary), then DHT (fallback)
-  let torrents = await searchTPB(query, tpbCat);
+  // Try TorrentProject first (returns latest if no query)
+  let torrents = await searchTorrentProject(query);
+  // Fallback to DHT
   if (!torrents.length) {
-    torrents = await searchDHT(query || "1080p");   // fallback with a generic term if DHT needs a query
+    torrents = await searchDHT(query);
   }
 
-  // Convert to Stremio metas, **filtering out anything invalid**
+  // If still nothing, try a generic fallback
+  if (!torrents.length) {
+    console.log("Trying fallback search '1080p'");
+    torrents = await searchDHT("1080p");
+  }
+
+  // Filter and map to Stremio meta (strict null removal)
   return torrents
-    .filter(t => t && t.info_hash)               // discard empty rows
+    .filter(t => t && t.info_hash)
     .map(t => {
       const hash = t.info_hash;
       const name = t.name || "Unknown";
@@ -266,19 +270,19 @@ async function handleStream(streamId, rdApiKey) {
   );
 
   const streams = await Promise.all(streamPromises);
-  return streams.filter(s => s && s.url);   // strict null removal
+  return streams.filter(s => s && s.url);
 }
 
-// ===================== ROUTES (accept optional trailing slash) =====================
+// ===================== ROUTES (bulletproof trailing‑slash handling) =====================
 app.get("/manifest.json", (req, res) => {
   res.json({ error: "Please configure via the web page at /" });
 });
 
-app.get("/:rd_api/manifest.json/??", (req, res) => {
+app.get(["/:rd_api/manifest.json", "/:rd_api/manifest.json/"], (req, res) => {
   res.json(MANIFEST);
 });
 
-app.get("/:rd_api/catalog/:type/:id.json/??", async (req, res) => {
+app.get(["/:rd_api/catalog/:type/:id.json", "/:rd_api/catalog/:type/:id.json/"], async (req, res) => {
   try {
     const metas = await handleCatalog(req.params.type, req.params.id, req.query);
     res.json({ metas });
@@ -288,7 +292,7 @@ app.get("/:rd_api/catalog/:type/:id.json/??", async (req, res) => {
   }
 });
 
-app.get("/:rd_api/stream/:type/:id.json/??", async (req, res) => {
+app.get(["/:rd_api/stream/:type/:id.json", "/:rd_api/stream/:type/:id.json/"], async (req, res) => {
   try {
     const streams = await handleStream(req.params.id, req.params.rd_api);
     res.json({ streams });
@@ -298,7 +302,6 @@ app.get("/:rd_api/stream/:type/:id.json/??", async (req, res) => {
   }
 });
 
-// Catch everything else
 app.use((req, res) => {
   console.log(`❌ 404 Not Found: ${req.method} ${req.originalUrl}`);
   res.status(404).json({ error: "Not Found", url: req.originalUrl });
