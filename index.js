@@ -9,17 +9,21 @@ const GENRES = [
   "Horror", "Sci-Fi", "Thriller", "Documentary", "Adult (XXX)"
 ];
 
-// TPB mirrors – cloudscraper will bypass Cloudflare
 const TPB_MIRRORS = [
   "https://apibay.org",
   "https://tpb.party/apibay"
 ];
 
-const DHT_API = "https://dht.lc/search";
+// TPB category IDs – keeps movies / series / videos separate
+const CATEGORY_MAP = {
+  movie: 201,
+  series: 205,
+  other: 200
+};
 
 const MANIFEST = {
   id: "community.rawstreamer.config",
-  version: "4.0.0",
+  version: "5.0.0",
   name: "Raw Torrent Streamer",
   description: "Unfiltered torrent catalog with Real-Debrid. Use the web config page to set your API key.",
   resources: ["catalog", "stream"],
@@ -64,12 +68,22 @@ app.use((req, res, next) => {
   next();
 });
 
+// Remove trailing slashes silently (prevents any 404)
+app.use((req, res, next) => {
+  if (req.path.length > 1 && req.path.endsWith("/")) {
+    const query = req.url.slice(req.path.length);
+    res.redirect(301, req.path.slice(0, -1) + query);
+  } else {
+    next();
+  }
+});
+
 app.use((req, res, next) => {
   console.log(`${new Date().toISOString()} ${req.method} ${req.url}`);
   next();
 });
 
-// ===================== CONFIG PAGE – no button, auto‑generate link =====================
+// ===================== CONFIG PAGE (auto‑generates link) =====================
 app.get("/", (req, res) => {
   res.send(`
     <!DOCTYPE html>
@@ -110,7 +124,7 @@ app.get("/", (req, res) => {
   `);
 });
 
-// ===================== TORRENT SEARCH (with cloudscraper) =====================
+// ===================== TORRENT SEARCH =====================
 async function searchTPB(query, category) {
   for (const base of TPB_MIRRORS) {
     try {
@@ -131,7 +145,7 @@ async function searchTPB(query, category) {
 
 async function searchDHT(query) {
   try {
-    const url = `${DHT_API}?q=${encodeURIComponent(query)}`;
+    const url = `https://dht.lc/search?q=${encodeURIComponent(query)}`;
     console.log(`Trying DHT: ${url}`);
     const resp = await fetch(url, { headers: { 'User-Agent': 'Mozilla/5.0' } });
     const data = await resp.json();
@@ -163,16 +177,19 @@ async function handleCatalog(type, id, extra = {}) {
 
   if (!query) query = "1080p";   // default feed
 
-  // Try TPB first (cloudscraper), then DHT
-  let torrents = await searchTPB(query, 0); // category 0 = all (we rely on API, but filter is optional)
+  // Use correct TPB category for this type (movies 201, series 205, etc.)
+  const tpbCat = CATEGORY_MAP[type] || 0;
+
+  // Try TPB first, then DHT
+  let torrents = await searchTPB(query, tpbCat);
   if (!torrents.length) {
     torrents = await searchDHT(query);
   }
 
-  // Fallback search term if nothing found
+  // Fallback search term if still nothing
   if (!torrents.length && query === "1080p") {
     console.log("Fallback search '2024'");
-    torrents = await searchTPB("2024", 0);
+    torrents = await searchTPB("2024", tpbCat);
     if (!torrents.length) torrents = await searchDHT("2024");
   }
 
@@ -222,6 +239,7 @@ async function handleStream(streamId, rdApiKey) {
     limit(async () => {
       const hash = torrent.infoHash;
       try {
+        // Add magnet to RD
         const addResp = await fetch("https://api.real-debrid.com/rest/1.0/torrents/addMagnet", {
           method: "POST",
           headers: { "Authorization": `Bearer ${rdApiKey}`, "User-Agent": "RawStreamer/1.0" },
@@ -230,18 +248,21 @@ async function handleStream(streamId, rdApiKey) {
         const addData = await addResp.json();
         if (!addData.id) return null;
 
+        // Select all files
         await fetch(`https://api.real-debrid.com/rest/1.0/torrents/selectFiles/${addData.id}`, {
           method: "POST",
           headers: { "Authorization": `Bearer ${rdApiKey}`, "User-Agent": "RawStreamer/1.0" },
           body: new URLSearchParams({ files: "all" })
         });
 
+        // Get file info
         const infoResp = await fetch(`https://api.real-debrid.com/rest/1.0/torrents/info/${addData.id}`, {
           headers: { "Authorization": `Bearer ${rdApiKey}`, "User-Agent": "RawStreamer/1.0" }
         });
         const infoData = await infoResp.json();
         if (!infoData.links || infoData.links.length === 0) return null;
 
+        // Unrestrict first link
         const unrestrictResp = await fetch("https://api.real-debrid.com/rest/1.0/unrestrict/link", {
           method: "POST",
           headers: { "Authorization": `Bearer ${rdApiKey}`, "User-Agent": "RawStreamer/1.0" },
@@ -254,7 +275,7 @@ async function handleStream(streamId, rdApiKey) {
             url: unrestrictData.download
           };
         }
-        return null;
+        return null;  // will be filtered out
       } catch (err) {
         return null;
       }
@@ -262,7 +283,8 @@ async function handleStream(streamId, rdApiKey) {
   );
 
   const streams = await Promise.all(streamPromises);
-  return streams.filter(Boolean);
+  // Remove any null / undefined / empty objects
+  return streams.filter(s => s && s.url);
 }
 
 // ===================== ROUTES =====================
@@ -270,11 +292,11 @@ app.get("/manifest.json", (req, res) => {
   res.json({ error: "Please configure via the web page at /" });
 });
 
-app.get(["/:rd_api/manifest.json", "/:rd_api/manifest.json/"], (req, res) => {
+app.get("/:rd_api/manifest.json", (req, res) => {
   res.json(MANIFEST);
 });
 
-app.get(["/:rd_api/catalog/:type/:id.json", "/:rd_api/catalog/:type/:id.json/"], async (req, res) => {
+app.get("/:rd_api/catalog/:type/:id.json", async (req, res) => {
   try {
     const metas = await handleCatalog(req.params.type, req.params.id, req.query);
     res.json({ metas });
@@ -284,7 +306,7 @@ app.get(["/:rd_api/catalog/:type/:id.json", "/:rd_api/catalog/:type/:id.json/"],
   }
 });
 
-app.get(["/:rd_api/stream/:type/:id.json", "/:rd_api/stream/:type/:id.json/"], async (req, res) => {
+app.get("/:rd_api/stream/:type/:id.json", async (req, res) => {
   try {
     const streams = await handleStream(req.params.id, req.params.rd_api);
     res.json({ streams });
