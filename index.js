@@ -8,16 +8,48 @@ const GENRES = [
   "Horror", "Sci-Fi", "Thriller", "Documentary", "Adult (XXX)"
 ];
 
-// TorrentProject API – no Cloudflare, works from Render
-const TORRENTPROJECT_API = "https://torrentproject.cc/api/v1/torrents";
-// DHT fallback
-const DHT_API = "https://dht.lc/search";
+// Multiple reliable JSON torrent APIs (no Cloudflare)
+const TORRENT_APIS = [
+  {
+    name: "TorrentProject",
+    url: (query) => `https://torrentproject.cc/api/v1/torrents?limit=100&search=${encodeURIComponent(query || "")}`,
+    parse: (json) => json.torrents?.map(i => ({
+      info_hash: i.hash,
+      name: i.title,
+      size: i.size || 0,
+      seeders: i.seeders || 0,
+      added: i.uploaded || Math.floor(Date.now()/1000)
+    })) || []
+  },
+  {
+    name: "DHT",
+    url: (query) => `https://dht.lc/search?q=${encodeURIComponent(query || "latest")}`,
+    parse: (data) => Array.isArray(data) ? data.map(i => ({
+      info_hash: i.info_hash,
+      name: i.name,
+      size: i.size || 0,
+      seeders: i.seeders || 0,
+      added: i.added || 0
+    })) : []
+  },
+  {
+    name: "APIBay (TPB)",
+    url: (query) => `https://apibay.org/q.php?q=${encodeURIComponent(query || "")}&cat=0`,
+    parse: (data) => Array.isArray(data) && data[0]?.id !== "0" ? data.map(i => ({
+      info_hash: i.info_hash,
+      name: i.name,
+      size: i.size,
+      seeders: i.seeders,
+      added: i.added
+    })) : []
+  }
+];
 
 const MANIFEST = {
-  id: "community.rawstreamer.config",
-  version: "8.0.0",
+  id: "community.rawstreamer.final",
+  version: "1.0.0",
   name: "Raw Torrent Streamer",
-  description: "Unfiltered latest torrents (Movies, Series, Videos) via Real-Debrid.",
+  description: "Latest unfiltered torrents (Movies, Series, Videos) via Real-Debrid.",
   resources: ["catalog", "stream"],
   types: ["movie", "series", "other"],
   idPrefixes: ["tt", "raw_"],
@@ -60,12 +92,13 @@ app.use((req, res, next) => {
   next();
 });
 
+// Log all requests
 app.use((req, res, next) => {
-  console.log(`${new Date().toISOString()} ${req.method} ${req.url}`);
+  console.log(`${new Date().toISOString()} ${req.method} ${req.originalUrl}`);
   next();
 });
 
-// ===================== CONFIG PAGE (auto‑generates link) =====================
+// ===================== CONFIG PAGE =====================
 app.get("/", (req, res) => {
   res.send(`
     <!DOCTYPE html>
@@ -74,31 +107,25 @@ app.get("/", (req, res) => {
       <meta charset="utf-8">
       <title>Raw Torrent Streamer – Setup</title>
       <style>
-        body { font-family: Arial, sans-serif; background: #1e1e1e; color: #eee; padding: 2rem; text-align: center; }
+        body { font-family: Arial; background: #111; color: #eee; padding: 2rem; text-align: center; }
         input { padding: 0.75rem; width: 300px; margin: 1rem 0; border: none; border-radius: 6px; }
-        .link-box { background: #333; padding: 1rem; border-radius: 8px; word-break: break-all; margin: 1rem auto; max-width: 600px; }
+        .link-box { background: #222; padding: 1rem; border-radius: 8px; word-break: break-all; margin: 1rem auto; max-width: 600px; }
         a { color: #e50914; }
       </style>
     </head>
     <body>
       <h2>⚙️ Configure Your Add-on</h2>
-      <p>Paste your Real-Debrid API token below (<a href="https://real-debrid.com/apitoken" target="_blank">get it here</a>)</p>
+      <p>Enter your Real-Debrid API token<br>(<a href="https://real-debrid.com/apitoken" target="_blank">get it here</a>)</p>
       <input type="text" id="apikey" placeholder="Paste your RD API key" oninput="updateLink()" />
       <div id="result"></div>
       <script>
         function updateLink() {
-          var key = document.getElementById("apikey").value.trim();
-          if (!key) {
-            document.getElementById("result").innerHTML = "";
-            return;
-          }
-          var installLink = window.location.origin + "/" + key + "/manifest.json";
+          const key = document.getElementById("apikey").value.trim();
+          if (!key) { document.getElementById("result").innerHTML = ""; return; }
+          const link = window.location.origin + "/" + key + "/manifest.json";
           document.getElementById("result").innerHTML =
-            "<div class='link-box'>" +
-            "<strong>Your Stremio install link:</strong><br/>" +
-            "<code>" + installLink + "</code><br/><br/>" +
-            "<button onclick=\"navigator.clipboard.writeText('" + installLink + "')\">📋 Copy to Clipboard</button>" +
-            "</div>";
+            "<div class='link-box'><strong>Your Stremio install link:</strong><br><code>" + link + "</code><br><br>" +
+            "<button onclick=\"navigator.clipboard.writeText('"+link+"')\">📋 Copy to Clipboard</button></div>";
         }
       </script>
     </body>
@@ -106,59 +133,27 @@ app.get("/", (req, res) => {
   `);
 });
 
-// ===================== TORRENT SEARCH =====================
-
-// TorrentProject – returns latest torrents, accepts query
-async function searchTorrentProject(query) {
-  try {
-    const params = new URLSearchParams();
-    params.set("limit", "100");
-    if (query) params.set("search", query);
-    const url = `${TORRENTPROJECT_API}?${params.toString()}`;
-    console.log(`Trying TorrentProject: ${url}`);
-    const resp = await fetch(url, {
-      headers: { 'User-Agent': 'Mozilla/5.0' },
-      timeout: 10000
-    });
-    const json = await resp.json();
-    if (json.torrents && json.torrents.length > 0) {
-      console.log(`TorrentProject returned ${json.torrents.length} results`);
-      return json.torrents.map(item => ({
-        info_hash: item.hash,
-        name: item.title,
-        size: item.size || 0,
-        seeders: item.seeders || 0,
-        added: item.uploaded || Math.floor(Date.now() / 1000)
-      }));
+// ===================== TORRENT FETCHING =====================
+async function fetchTorrents(query) {
+  // Use empty string for latest torrents if no query
+  const q = query || "";
+  for (const api of TORRENT_APIS) {
+    try {
+      const url = api.url(q);
+      console.log(`Trying ${api.name}: ${url}`);
+      const resp = await fetch(url, {
+        headers: { 'User-Agent': 'Mozilla/5.0' },
+        timeout: 8000
+      });
+      const data = await resp.json();
+      const results = api.parse(data);
+      if (results.length > 0) {
+        console.log(`${api.name} returned ${results.length} torrents`);
+        return results;
+      }
+    } catch (e) {
+      console.log(`${api.name} failed: ${e.message}`);
     }
-  } catch (err) {
-    console.log(`TorrentProject failed: ${err.message}`);
-  }
-  return [];
-}
-
-// DHT fallback (no Cloudflare)
-async function searchDHT(query) {
-  try {
-    const url = `${DHT_API}?q=${encodeURIComponent(query || "1080p")}`;
-    console.log(`Trying DHT: ${url}`);
-    const resp = await fetch(url, {
-      headers: { 'User-Agent': 'Mozilla/5.0' },
-      timeout: 10000
-    });
-    const data = await resp.json();
-    if (Array.isArray(data) && data.length > 0) {
-      console.log(`DHT returned ${data.length} results`);
-      return data.map(item => ({
-        info_hash: item.info_hash,
-        name: item.name,
-        size: item.size || 0,
-        seeders: item.seeders || 0,
-        added: item.added || 0
-      }));
-    }
-  } catch (err) {
-    console.log(`DHT failed: ${err.message}`);
   }
   return [];
 }
@@ -166,49 +161,29 @@ async function searchDHT(query) {
 // ===================== CATALOG HANDLER =====================
 async function handleCatalog(type, id, extra = {}) {
   let query = "";
-
   if (extra.search) {
     query = extra.search;
   } else if (extra.genre && extra.genre !== "All Content") {
     query = extra.genre === "Adult (XXX)" ? "XXX" : extra.genre;
   }
+  // For empty query, fetch latest torrents (most APIs return recent when no search)
+  const torrents = await fetchTorrents(query);
 
-  // Try TorrentProject first (returns latest if no query)
-  let torrents = await searchTorrentProject(query);
-  // Fallback to DHT
-  if (!torrents.length) {
-    torrents = await searchDHT(query);
-  }
-  // Last resort fallback
-  if (!torrents.length) {
-    console.log("Trying fallback search '1080p'");
-    torrents = await searchDHT("1080p");
-  }
-
-  // Strict filter and map to Stremio meta
+  // Strict filtering and mapping
   return torrents
     .filter(t => t && t.info_hash)
-    .map(t => {
-      const hash = t.info_hash;
-      const name = t.name || "Unknown";
-      const seeders = t.seeders || 0;
-      const size = t.size ? (t.size / 1e9).toFixed(2) + " GB" : "? GB";
-      const added = t.added ? new Date(t.added * 1000).toLocaleDateString() : "N/A";
-      return {
-        id: `raw_${hash}`,
-        type: type,
-        name: name,
-        poster: `https://images.placeholders.dev/?width=300&height=450&text=${encodeURIComponent(name.slice(0, 25))}`,
-        description: `🌱 ${seeders} seeds | 💾 ${size} | 📅 ${added}`
-      };
-    });
+    .map(t => ({
+      id: `raw_${t.info_hash}`,
+      type: type,
+      name: t.name || "Unknown",
+      poster: `https://images.placeholders.dev/?width=300&height=450&text=${encodeURIComponent((t.name||"").slice(0,25))}`,
+      description: `🌱 ${t.seeders||0} seeds | 💾 ${t.size ? (t.size/1e9).toFixed(2)+" GB" : "? GB"} | 📅 ${t.added ? new Date(t.added*1000).toLocaleDateString() : "N/A"}`
+    }));
 }
 
-// ===================== STREAM HANDLER (Real-Debrid) =====================
+// ===================== STREAM HANDLER =====================
 async function handleStream(streamId, rdApiKey) {
-  if (!rdApiKey) {
-    return [{ title: "⚠️ Real-Debrid API key missing", url: "" }];
-  }
+  if (!rdApiKey) return [{ title: "⚠️ Real-Debrid API key missing", url: "" }];
 
   let torrents = [];
   if (streamId.startsWith("raw_")) {
@@ -224,16 +199,16 @@ async function handleStream(streamId, rdApiKey) {
         infoHash: s.infoHash,
         title: s.title || s.name
       }));
-    } catch (e) { /* ignore */ }
+    } catch (e) {}
   }
-
   if (!torrents.length) return [];
 
   const limit = pLimit(2);
-  const streamPromises = torrents.slice(0, 5).map(torrent =>
+  const streamPromises = torrents.slice(0,5).map(torrent =>
     limit(async () => {
       const hash = torrent.infoHash;
       try {
+        // Add magnet
         const addResp = await fetch("https://api.real-debrid.com/rest/1.0/torrents/addMagnet", {
           method: "POST",
           headers: { "Authorization": `Bearer ${rdApiKey}`, "User-Agent": "RawStreamer/1.0" },
@@ -242,18 +217,21 @@ async function handleStream(streamId, rdApiKey) {
         const addData = await addResp.json();
         if (!addData.id) return null;
 
+        // Select all files
         await fetch(`https://api.real-debrid.com/rest/1.0/torrents/selectFiles/${addData.id}`, {
           method: "POST",
           headers: { "Authorization": `Bearer ${rdApiKey}`, "User-Agent": "RawStreamer/1.0" },
           body: new URLSearchParams({ files: "all" })
         });
 
+        // Get info
         const infoResp = await fetch(`https://api.real-debrid.com/rest/1.0/torrents/info/${addData.id}`, {
           headers: { "Authorization": `Bearer ${rdApiKey}`, "User-Agent": "RawStreamer/1.0" }
         });
         const infoData = await infoResp.json();
-        if (!infoData.links || infoData.links.length === 0) return null;
+        if (!infoData.links?.length) return null;
 
+        // Unrestrict first link
         const unrestrictResp = await fetch("https://api.real-debrid.com/rest/1.0/unrestrict/link", {
           method: "POST",
           headers: { "Authorization": `Bearer ${rdApiKey}`, "User-Agent": "RawStreamer/1.0" },
@@ -268,12 +246,11 @@ async function handleStream(streamId, rdApiKey) {
       }
     })
   );
-
   const streams = await Promise.all(streamPromises);
   return streams.filter(s => s && s.url);
 }
 
-// ===================== ROUTES (accept both with and without trailing slash) =====================
+// ===================== ROUTES (trailing‑slash safe) =====================
 app.get("/manifest.json", (req, res) => {
   res.json({ error: "Please configure via the web page at /" });
 });
@@ -302,6 +279,23 @@ app.get(["/:rd_api/stream/:type/:id.json", "/:rd_api/stream/:type/:id.json/"], a
   }
 });
 
+// Test route: try all sources manually
+app.get("/test", async (req, res) => {
+  const results = {};
+  for (const api of TORRENT_APIS) {
+    try {
+      const url = api.url("");
+      const resp = await fetch(url, { headers: { 'User-Agent': 'Mozilla/5.0' } });
+      const data = await resp.json();
+      results[api.name] = api.parse(data).length;
+    } catch(e) {
+      results[api.name] = "error: " + e.message;
+    }
+  }
+  res.json(results);
+});
+
+// Catch-all
 app.use((req, res) => {
   console.log(`❌ 404 Not Found: ${req.method} ${req.originalUrl}`);
   res.status(404).json({ error: "Not Found", url: req.originalUrl });
