@@ -1,7 +1,6 @@
 const fs = require("fs");
 const fetch = require("node-fetch");
 
-// All sources we'll try (JSON APIs that work from GitHub runners)
 const sources = [
   {
     name: "TorrentProject",
@@ -26,7 +25,7 @@ const sources = [
     })) : []
   },
   {
-    name: "TPB (apibay.org)",
+    name: "TPB (apibay)",
     url: (cat) => `https://apibay.org/q.php?q=${cat}&cat=0`,
     parse: (data) => Array.isArray(data) && data[0]?.id !== "0" ? data.map(i => ({
       info_hash: i.info_hash,
@@ -48,7 +47,7 @@ const categories = {
 async function fetchAll() {
   let allTorrents = [];
 
-  // Load existing torrents to avoid duplicates
+  // Load existing list
   try {
     if (fs.existsSync("torrents.json")) {
       const old = JSON.parse(fs.readFileSync("torrents.json", "utf8"));
@@ -56,16 +55,12 @@ async function fetchAll() {
     }
   } catch (e) {}
 
-  // Scrape each source for each category
   for (const source of sources) {
     for (const [cat, query] of Object.entries(categories)) {
       try {
         const url = source.url(query);
         console.log(`Trying ${source.name} (${cat}): ${url}`);
-        const resp = await fetch(url, {
-          headers: { 'User-Agent': 'Mozilla/5.0' },
-          timeout: 10000
-        });
+        const resp = await fetch(url, { headers: { 'User-Agent': 'Mozilla/5.0' } });
         if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
         const json = await resp.json();
         const results = source.parse(json);
@@ -82,11 +77,10 @@ async function fetchAll() {
     }
   }
 
-  // Sort by seeders (descending) and keep latest 5000
   allTorrents.sort((a, b) => (b.seeders || 0) - (a.seeders || 0));
   allTorrents = allTorrents.slice(0, 5000);
 
-  // Always save, even if empty (prevents workflow failure)
+  // Always write a valid file (even if empty)
   fs.writeFileSync("torrents.json", JSON.stringify({
     updated: new Date().toISOString(),
     torrents: allTorrents
@@ -94,8 +88,12 @@ async function fetchAll() {
   console.log(`Saved ${allTorrents.length} torrents total.`);
 }
 
-fetchAll().catch(e => {
-  // Write an empty file if the whole process crashes
-  fs.writeFileSync("torrents.json", JSON.stringify({ updated: new Date().toISOString(), torrents: [] }));
-  console.error("Fatal error, wrote empty torrents.json:", e.message);
-});
+// Catch any fatal error and still write an empty file
+(async () => {
+  try {
+    await fetchAll();
+  } catch (e) {
+    console.error("Fatal error, writing empty torrents.json:", e.message);
+    fs.writeFileSync("torrents.json", JSON.stringify({ updated: new Date().toISOString(), torrents: [] }));
+  }
+})();
