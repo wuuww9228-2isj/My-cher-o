@@ -1,6 +1,7 @@
 const express = require("express");
 const fetch = require("node-fetch");
 const pLimit = require("p-limit");
+const cloudscraper = require("cloudscraper");
 
 // ===================== CONFIG =====================
 const GENRES = [
@@ -8,10 +9,11 @@ const GENRES = [
   "Horror", "Sci-Fi", "Thriller", "Documentary", "Adult (XXX)"
 ];
 
+// Pirate Bay mirrors (all accessed via cloudscraper to bypass Cloudflare)
 const TPB_MIRRORS = [
   "https://apibay.org",
-  "https://apibay.cc",
-  "https://tpb.party/apibay"
+  "https://tpb.party/apibay",
+  "https://tpb23.ukpass.co/apibay"
 ];
 
 const CATEGORY_MAP = {
@@ -22,7 +24,7 @@ const CATEGORY_MAP = {
 
 const MANIFEST = {
   id: "community.rawstreamer.config",
-  version: "1.1.0",
+  version: "1.2.0",
   name: "Raw Torrent Streamer (configurable)",
   description: "Unfiltered torrent catalog with Real-Debrid. Use the web config page to set your API key.",
   resources: ["catalog", "stream"],
@@ -67,7 +69,6 @@ app.use((req, res, next) => {
   next();
 });
 
-// Log every request (you’ll see exactly what Stremio sends)
 app.use((req, res, next) => {
   console.log(`${new Date().toISOString()} ${req.method} ${req.url}`);
   next();
@@ -115,14 +116,15 @@ app.get("/", (req, res) => {
   `);
 });
 
-// ===================== TORRENT SEARCH =====================
+// ===================== TORRENT SEARCH (using cloudscraper) =====================
 async function searchTPB(query, category) {
   for (const base of TPB_MIRRORS) {
     try {
       const url = `${base}/q.php?q=${encodeURIComponent(query)}&cat=${category || 0}`;
-      console.log(`Trying TPB: ${url}`);
-      const resp = await fetch(url, { headers: { 'User-Agent': 'Mozilla/5.0' } });
-      const data = await resp.json();
+      console.log(`Trying TPB (cloudscraper): ${url}`);
+      // cloudscraper returns the page body directly as a string
+      const body = await cloudscraper.get(url);
+      const data = JSON.parse(body);
       if (Array.isArray(data) && data.length > 0 && data[0].id !== "0") {
         console.log(`TPB success: ${data.length} torrents from ${base}`);
         return data;
@@ -134,14 +136,15 @@ async function searchTPB(query, category) {
   return [];
 }
 
+// Fallback: SolidTorrents (also with cloudscraper if needed, but it's usually JSON)
 async function searchSolidTorrents(query, type) {
   const catMap = { movie: "movies", series: "tv", other: "videos" };
   const cat = catMap[type] || "all";
   try {
     const url = `https://solidtorrents.net/api/v1/search?q=${encodeURIComponent(query)}&category=${cat}&sort=seeders`;
     console.log(`Trying SolidTorrents: ${url}`);
-    const resp = await fetch(url, { headers: { 'User-Agent': 'Mozilla/5.0' } });
-    const json = await resp.json();
+    const body = await cloudscraper.get(url);   // cloudscraper just in case
+    const json = JSON.parse(body);
     if (json.results && json.results.length > 0) {
       console.log(`SolidTorrents returned ${json.results.length} results`);
       return json.results.map(item => ({
@@ -158,7 +161,7 @@ async function searchSolidTorrents(query, type) {
   return [];
 }
 
-// ===================== CATALOG HANDLER (with fallback search terms) =====================
+// ===================== CATALOG HANDLER =====================
 async function handleCatalog(type, id, extra = {}) {
   let query = "";
 
@@ -168,19 +171,16 @@ async function handleCatalog(type, id, extra = {}) {
     query = extra.genre === "Adult (XXX)" ? "XXX" : extra.genre;
   }
 
-  // If no user input, use a default broad query so catalogs aren’t empty
-  if (!query) {
-    query = "1080p";  // shows a variety of recent HD torrents
-  }
+  // Default search term so catalogs aren't empty
+  if (!query) query = "1080p";
 
   let torrents = await searchTPB(query, CATEGORY_MAP[type]);
   if (!torrents.length) {
     torrents = await searchSolidTorrents(query, type);
   }
-
-  // Final fallback: try a different default search
+  // Second fallback if nothing
   if (!torrents.length && query === "1080p") {
-    console.log("Trying fallback search term '2024'...");
+    console.log("Fallback to '2024'");
     torrents = await searchTPB("2024", CATEGORY_MAP[type]);
     if (!torrents.length) torrents = await searchSolidTorrents("2024", type);
   }
@@ -231,7 +231,6 @@ async function handleStream(streamId, rdApiKey) {
     limit(async () => {
       const hash = torrent.infoHash;
       try {
-        // Add magnet
         const addResp = await fetch("https://api.real-debrid.com/rest/1.0/torrents/addMagnet", {
           method: "POST",
           headers: { "Authorization": `Bearer ${rdApiKey}`, "User-Agent": "RawStreamer/1.0" },
@@ -240,21 +239,18 @@ async function handleStream(streamId, rdApiKey) {
         const addData = await addResp.json();
         if (!addData.id) return null;
 
-        // Select all files
         await fetch(`https://api.real-debrid.com/rest/1.0/torrents/selectFiles/${addData.id}`, {
           method: "POST",
           headers: { "Authorization": `Bearer ${rdApiKey}`, "User-Agent": "RawStreamer/1.0" },
           body: new URLSearchParams({ files: "all" })
         });
 
-        // Get info
         const infoResp = await fetch(`https://api.real-debrid.com/rest/1.0/torrents/info/${addData.id}`, {
           headers: { "Authorization": `Bearer ${rdApiKey}`, "User-Agent": "RawStreamer/1.0" }
         });
         const infoData = await infoResp.json();
         if (!infoData.links || infoData.links.length === 0) return null;
 
-        // Unrestrict first link
         const unrestrictResp = await fetch("https://api.real-debrid.com/rest/1.0/unrestrict/link", {
           method: "POST",
           headers: { "Authorization": `Bearer ${rdApiKey}`, "User-Agent": "RawStreamer/1.0" },
@@ -278,12 +274,11 @@ async function handleStream(streamId, rdApiKey) {
   return streams.filter(Boolean);
 }
 
-// ===================== ROUTES (bulletproof trailing slashes) =====================
+// ===================== ROUTES =====================
 app.get("/manifest.json", (req, res) => {
   res.json({ error: "Please configure via the web page at /" });
 });
 
-// This pattern accepts both `/KEY/manifest.json` and `/KEY/manifest.json/`
 app.get(["/:rd_api/manifest.json", "/:rd_api/manifest.json/"], (req, res) => {
   res.json(MANIFEST);
 });
@@ -308,12 +303,11 @@ app.get(["/:rd_api/stream/:type/:id.json", "/:rd_api/stream/:type/:id.json/"], a
   }
 });
 
-// Debug: log any unmatched route
 app.use((req, res) => {
   console.log(`❌ 404 Not Found: ${req.method} ${req.originalUrl}`);
   res.status(404).json({ error: "Not Found", url: req.originalUrl });
 });
 
-// ===================== START SERVER =====================
+// ===================== START =====================
 const PORT = process.env.PORT || 7000;
-app.listen(PORT, () => console.log(`✅ RawStreamer config page running on port ${PORT}`));
+app.listen(PORT, () => console.log(`✅ RawStreamer running on port ${PORT}`));
