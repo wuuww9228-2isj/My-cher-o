@@ -8,21 +8,18 @@ const GENRES = [
   "Horror", "Sci-Fi", "Thriller", "Documentary", "Adult (XXX)"
 ];
 
-// Multiple TPB API mirrors (all unfiltered)
 const TPB_MIRRORS = [
   "https://apibay.org",
   "https://apibay.cc",
   "https://tpb.party/apibay"
 ];
 
-// Category IDs for TPB
 const CATEGORY_MAP = {
-  movie: 201,    // Movies
-  series: 205,   // TV shows
-  other: 200     // Video/VOD
+  movie: 201,
+  series: 205,
+  other: 200
 };
 
-// Manifest (no configurable flag – user configures via our web page)
 const MANIFEST = {
   id: "community.rawstreamer.config",
   version: "1.0.0",
@@ -70,7 +67,6 @@ app.use((req, res, next) => {
   next();
 });
 
-// Log requests for debugging
 app.use((req, res, next) => {
   console.log(`${new Date().toISOString()} ${req.method} ${req.url}`);
   next();
@@ -221,7 +217,6 @@ async function handleStream(streamId, rdApiKey) {
     limit(async () => {
       const hash = torrent.infoHash;
       try {
-        // Add magnet to RD
         const addResp = await fetch("https://api.real-debrid.com/rest/1.0/torrents/addMagnet", {
           method: "POST",
           headers: { "Authorization": `Bearer ${rdApiKey}`, "User-Agent": "RawStreamer/1.0" },
@@ -230,21 +225,18 @@ async function handleStream(streamId, rdApiKey) {
         const addData = await addResp.json();
         if (!addData.id) return null;
 
-        // Select all files
         await fetch(`https://api.real-debrid.com/rest/1.0/torrents/selectFiles/${addData.id}`, {
           method: "POST",
           headers: { "Authorization": `Bearer ${rdApiKey}`, "User-Agent": "RawStreamer/1.0" },
           body: new URLSearchParams({ files: "all" })
         });
 
-        // Get file info
         const infoResp = await fetch(`https://api.real-debrid.com/rest/1.0/torrents/info/${addData.id}`, {
           headers: { "Authorization": `Bearer ${rdApiKey}`, "User-Agent": "RawStreamer/1.0" }
         });
         const infoData = await infoResp.json();
         if (!infoData.links || infoData.links.length === 0) return null;
 
-        // Unrestrict first link
         const unrestrictResp = await fetch("https://api.real-debrid.com/rest/1.0/unrestrict/link", {
           method: "POST",
           headers: { "Authorization": `Bearer ${rdApiKey}`, "User-Agent": "RawStreamer/1.0" },
@@ -268,19 +260,16 @@ async function handleStream(streamId, rdApiKey) {
   return streams.filter(Boolean);
 }
 
-// ===================== ROUTES =====================
-// Base manifest (no API key, just for Stremio to detect the addon? Not used)
+// ===================== ROUTES (with trailing-slash fix) =====================
 app.get("/manifest.json", (req, res) => {
   res.json({ error: "Please configure via the web page at /" });
 });
 
-// API-key-specific routes
-app.get("/:rd_api/manifest.json", (req, res) => {
-  // We can validate the key quickly? Not necessary.
+app.get("/:rd_api/manifest.json/??", (req, res) => {
   res.json(MANIFEST);
 });
 
-app.get("/:rd_api/catalog/:type/:id.json", async (req, res) => {
+app.get("/:rd_api/catalog/:type/:id.json/??", async (req, res) => {
   try {
     const metas = await handleCatalog(req.params.type, req.params.id, req.query);
     res.json({ metas });
@@ -290,7 +279,7 @@ app.get("/:rd_api/catalog/:type/:id.json", async (req, res) => {
   }
 });
 
-app.get("/:rd_api/stream/:type/:id.json", async (req, res) => {
+app.get("/:rd_api/stream/:type/:id.json/??", async (req, res) => {
   try {
     const streams = await handleStream(req.params.id, req.params.rd_api);
     res.json({ streams });
@@ -298,6 +287,12 @@ app.get("/:rd_api/stream/:type/:id.json", async (req, res) => {
     console.error("Stream error:", e);
     res.json({ streams: [] });
   }
+});
+
+// Debug: log any unmatched route
+app.use((req, res) => {
+  console.log(`❌ 404 Not Found: ${req.method} ${req.originalUrl}`);
+  res.status(404).json({ error: "Not Found", url: req.originalUrl });
 });
 
 // ===================== START SERVER =====================
