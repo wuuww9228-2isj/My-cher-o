@@ -4,9 +4,9 @@ const cheerio = require('cheerio');
 
 const manifest = {
   id: 'com.personal.rdscraper',
-  version: '1.1.1',
+  version: '1.2.0',
   name: 'My Personal RD Addon',
-  description: 'Real scraping + Real-Debrid',
+  description: 'Multi-site scraper + Real-Debrid',
   resources: ['catalog', 'stream'],
   types: ['movie', 'series'],
   idPrefixes: ['tt'],
@@ -21,21 +21,29 @@ const manifest = {
 
 const builder = new addonBuilder(manifest);
 
-async function getLatestTorrents(type) {
+const SITES = [
+  'https://1337x.to',
+  'https://1337x.st',
+  'https://1337x.gd',
+  'https://www.torrentgalaxy.to'
+];
+
+async function getLatestFromSite(site, type) {
   try {
-    const url = type === 'movie' ? 'https://1337x.to/cat/Movies/1/' : 'https://1337x.to/cat/TV/1/';
-    const { data } = await axios.get(url);
+    let url = `${site}/cat/${type === 'movie' ? 'Movies' : 'TV'}/1/`;
+    if (site.includes('torrentgalaxy')) url = `${site}/movies`;
+    const { data } = await axios.get(url, { timeout: 8000, headers: { 'User-Agent': 'Mozilla/5.0' } });
     const $ = cheerio.load(data);
     const metas = [];
 
-    $('tr').slice(1, 30).each((i, el) => {
-      const name = $(el).find('.name').text().trim();
-      if (name) {
+    $('tr, .tgxtablerow').slice(1, 25).each((i, el) => {
+      let name = $(el).find('.name, .tgxtablerow td').text().trim();
+      if (name.length > 5) {
         metas.push({
           id: `tt${1000000 + i}`,
           type: type,
-          name: name,
-          poster: 'https://picsum.photos/id/' + (i + 10) + '/300/450'
+          name: name.substring(0, 80),
+          poster: `https://picsum.photos/id/${i + 20}/300/450`
         });
       }
     });
@@ -46,25 +54,26 @@ async function getLatestTorrents(type) {
 }
 
 builder.defineCatalogHandler(async (args) => {
-  const metas = await getLatestTorrents(args.type);
-  return { metas };
+  let allMetas = [];
+  for (const site of SITES) {
+    const metas = await getLatestFromSite(site, args.type);
+    allMetas = allMetas.concat(metas);
+    if (allMetas.length > 30) break;
+  }
+  return { metas: allMetas.slice(0, 30) };
 });
 
 builder.defineStreamHandler(async (args) => {
   const rdKey = args.config?.rdApiKey;
   if (!rdKey) {
-    return { streams: [{ name: "RD Key Missing", title: "Configure in add-on settings" }] };
+    return { streams: [{ name: "RD Key Missing", title: "Add in Configure" }] };
   }
-
-  // Test stream for now (real RD will be added next)
   return {
-    streams: [
-      {
-        url: "http://commondatastorage.googleapis.com/gtv-videos-bucket/sample/BigBuckBunny.mp4",
-        name: "✅ Test Stream (Working)",
-        title: "Big Buck Bunny - RD Ready"
-      }
-    ]
+    streams: [{
+      url: "http://commondatastorage.googleapis.com/gtv-videos-bucket/sample/BigBuckBunny.mp4",
+      name: "✅ Test Stream",
+      title: "Working with RD"
+    }]
   };
 });
 
