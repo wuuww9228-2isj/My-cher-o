@@ -1,13 +1,13 @@
 {
-  "name": "my-stremio-addon",
-  "version": "1.0.1",
+  "name": "raw-torrent-streamer",
+  "version": "1.0.0",
   "main": "server.js",
   "scripts": {
     "start": "node server.js"
   },
   "dependencies": {
-    "stremio-addon-sdk": "^1.6.10",
-    "axios": "^1.7.0",
-    "cheerio": "^1.0.0-rc.12"
+    "express": "^4.18.2",
+    "node-fetch": "^2.6.9",
+    "p-limit": "^4.0.0"
   }
 }
